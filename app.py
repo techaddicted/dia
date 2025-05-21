@@ -11,10 +11,11 @@ import torch
 
 from dia.model import Dia
 
-
 # --- Global Setup ---
 parser = argparse.ArgumentParser(description="Gradio interface for Nari TTS")
-parser.add_argument("--device", type=str, default=None, help="Force device (e.g., 'cuda', 'mps', 'cpu')")
+parser.add_argument(
+    "--device", type=str, default=None, help="Force device (e.g., 'cuda', 'mps', 'cpu')"
+)
 parser.add_argument("--share", action="store_true", help="Enable Gradio sharing")
 
 args = parser.parse_args()
@@ -38,7 +39,9 @@ print(f"Using device: {device}")
 print("Loading Nari model...")
 try:
     # Use the function from inference.py
-    model = Dia.from_pretrained("nari-labs/Dia-1.6B", compute_dtype="float16", device=device)
+    model = Dia.from_pretrained(
+        "nari-labs/Dia-1.6B", compute_dtype="float16", device=device
+    )
 except Exception as e:
     print(f"Error loading Nari model: {e}")
     raise
@@ -53,6 +56,7 @@ def run_inference(
     top_p: float,
     cfg_filter_top_k: int,
     speed_factor: float,
+    seed: int | None,
 ):
     """
     Runs Nari inference using the globally loaded model and provided inputs.
@@ -72,11 +76,15 @@ def run_inference(
         if audio_prompt_input is not None:
             sr, audio_data = audio_prompt_input
             # Check if audio_data is valid
-            if audio_data is None or audio_data.size == 0 or audio_data.max() == 0:  # Check for silence/empty
+            if (
+                audio_data is None or audio_data.size == 0 or audio_data.max() == 0
+            ):  # Check for silence/empty
                 gr.Warning("Audio prompt seems empty or silent, ignoring prompt.")
             else:
                 # Save prompt audio to a temporary WAV file
-                with tempfile.NamedTemporaryFile(mode="wb", suffix=".wav", delete=False) as f_audio:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", suffix=".wav", delete=False
+                ) as f_audio:
                     temp_audio_prompt_path = f_audio.name  # Store path for cleanup
 
                     # Basic audio preprocessing for consistency
@@ -85,12 +93,16 @@ def run_inference(
                         max_val = np.iinfo(audio_data.dtype).max
                         audio_data = audio_data.astype(np.float32) / max_val
                     elif not np.issubdtype(audio_data.dtype, np.floating):
-                        gr.Warning(f"Unsupported audio prompt dtype {audio_data.dtype}, attempting conversion.")
+                        gr.Warning(
+                            f"Unsupported audio prompt dtype {audio_data.dtype}, attempting conversion."
+                        )
                         # Attempt conversion, might fail for complex types
                         try:
                             audio_data = audio_data.astype(np.float32)
                         except Exception as conv_e:
-                            raise gr.Error(f"Failed to convert audio prompt to float32: {conv_e}")
+                            raise gr.Error(
+                                f"Failed to convert audio prompt to float32: {conv_e}"
+                            )
 
                     # Ensure mono (average channels if stereo)
                     if audio_data.ndim > 1:
@@ -103,9 +115,13 @@ def run_inference(
                                 f"Audio prompt has unexpected shape {audio_data.shape}, taking first channel/axis."
                             )
                             audio_data = (
-                                audio_data[0] if audio_data.shape[0] < audio_data.shape[1] else audio_data[:, 0]
+                                audio_data[0]
+                                if audio_data.shape[0] < audio_data.shape[1]
+                                else audio_data[:, 0]
                             )
-                        audio_data = np.ascontiguousarray(audio_data)  # Ensure contiguous after slicing/mean
+                        audio_data = np.ascontiguousarray(
+                            audio_data
+                        )  # Ensure contiguous after slicing/mean
 
                     # Write using soundfile
                     try:
@@ -113,7 +129,9 @@ def run_inference(
                             temp_audio_prompt_path, audio_data, sr, subtype="FLOAT"
                         )  # Explicitly use FLOAT subtype
                         prompt_path_for_generate = temp_audio_prompt_path
-                        print(f"Created temporary audio prompt file: {temp_audio_prompt_path} (orig sr: {sr})")
+                        print(
+                            f"Created temporary audio prompt file: {temp_audio_prompt_path} (orig sr: {sr})"
+                        )
                     except Exception as write_e:
                         print(f"Error writing temporary audio file: {write_e}")
                         raise gr.Error(f"Failed to save audio prompt: {write_e}")
@@ -121,6 +139,11 @@ def run_inference(
         # 3. Run Generation
 
         start_time = time.time()
+
+        # Generate a random seed if none provided
+        if seed is None:
+            seed = torch.randint(0, 2**32 - 1, (1,)).item()
+            print(f"Using random seed: {seed}")
 
         # Use torch.inference_mode() context manager for the generation call
         with torch.inference_mode():
@@ -133,6 +156,7 @@ def run_inference(
                 cfg_filter_top_k=cfg_filter_top_k,  # Pass the value here
                 use_torch_compile=False,  # Keep False for Gradio stability
                 audio_prompt=prompt_path_for_generate,
+                seed=seed,
             )
 
         end_time = time.time()
@@ -147,8 +171,10 @@ def run_inference(
             original_len = len(output_audio_np)
             # Ensure speed_factor is positive and not excessively small/large to avoid issues
             speed_factor = max(0.1, min(speed_factor, 5.0))
-            target_len = int(original_len / speed_factor)  # Target length based on speed_factor
-            if target_len != original_len and target_len > 0:  # Only interpolate if length changes and is valid
+            target_len = int(original_len / speed_factor)
+            if (
+                target_len != original_len and target_len > 0
+            ):  # Only interpolate if length changes and is valid
                 x_original = np.arange(original_len)
                 x_resampled = np.linspace(0, original_len - 1, target_len)
                 resampled_audio_np = np.interp(x_resampled, x_original, output_audio_np)
@@ -156,7 +182,9 @@ def run_inference(
                     output_sr,
                     resampled_audio_np.astype(np.float32),
                 )  # Use resampled audio
-                print(f"Resampled audio from {original_len} to {target_len} samples for {speed_factor:.2f}x speed.")
+                print(
+                    f"Resampled audio from {original_len} to {target_len} samples for {speed_factor:.2f}x speed."
+                )
             else:
                 output_audio = (
                     output_sr,
@@ -165,10 +193,15 @@ def run_inference(
                 print(f"Skipping audio speed adjustment (factor: {speed_factor:.2f}).")
             # --- End slowdown ---
 
-            print(f"Audio conversion successful. Final shape: {output_audio[1].shape}, Sample Rate: {output_sr}")
+            print(
+                f"Audio conversion successful. Final shape: {output_audio[1].shape}, Sample Rate: {output_sr}"
+            )
 
             # Explicitly convert to int16 to prevent Gradio warning
-            if output_audio[1].dtype == np.float32 or output_audio[1].dtype == np.float64:
+            if (
+                output_audio[1].dtype == np.float32
+                or output_audio[1].dtype == np.float64
+            ):
                 audio_for_gradio = np.clip(output_audio[1], -1.0, 1.0)
                 audio_for_gradio = (audio_for_gradio * 32767).astype(np.int16)
                 output_audio = (output_sr, audio_for_gradio)
@@ -194,15 +227,19 @@ def run_inference(
                 Path(temp_txt_file_path).unlink()
                 print(f"Deleted temporary text file: {temp_txt_file_path}")
             except OSError as e:
-                print(f"Warning: Error deleting temporary text file {temp_txt_file_path}: {e}")
+                print(
+                    f"Warning: Error deleting temporary text file {temp_txt_file_path}: {e}"
+                )
         if temp_audio_prompt_path and Path(temp_audio_prompt_path).exists():
             try:
                 Path(temp_audio_prompt_path).unlink()
                 print(f"Deleted temporary audio prompt file: {temp_audio_prompt_path}")
             except OSError as e:
-                print(f"Warning: Error deleting temporary audio prompt file {temp_audio_prompt_path}: {e}")
+                print(
+                    f"Warning: Error deleting temporary audio prompt file {temp_audio_prompt_path}: {e}"
+                )
 
-    return output_audio
+    return output_audio, seed
 
 
 # --- Create Gradio Interface ---
@@ -288,6 +325,19 @@ with gr.Blocks(css=css) as demo:
                     step=0.02,
                     info="Adjusts the speed of the generated audio (1.0 = original speed).",
                 )
+                with gr.Row():
+                    seed = gr.Number(
+                        label="Random Seed",
+                        value=None,
+                        precision=0,
+                        info="Set a random seed for reproducible generation. Leave empty for random generation.",
+                    )
+                    used_seed = gr.Textbox(
+                        label="Used Seed",
+                        value="",
+                        interactive=False,
+                        info="Shows the seed that was used for generation",
+                    )
 
             run_button = gr.Button("Generate Audio", variant="primary")
 
@@ -310,13 +360,14 @@ with gr.Blocks(css=css) as demo:
             top_p,
             cfg_filter_top_k,
             speed_factor_slider,
+            seed,
         ],
-        outputs=[audio_output],  # Add status_output here if using it
+        outputs=[audio_output, used_seed],  # Add used_seed to outputs
         api_name="generate_audio",
     )
 
     # Add examples (ensure the prompt path is correct or remove it if example file doesn't exist)
-    example_prompt_path = "./example_prompt.mp3"  # Adjust if needed
+    example_prompt_path = "./example_prompt.mp3"
     examples_list = [
         [
             "[S1] Oh fire! Oh my goodness! What's the procedure? What to we do people? The smoke could be coming through an air duct! \n[S2] Oh my god! Okay.. it's happening. Everybody stay calm! \n[S1] What's the procedure... \n[S2] Everybody stay fucking calm!!!... Everybody fucking calm down!!!!! \n[S1] No! No! If you touch the handle, if its hot there might be a fire down the hallway! ",
@@ -327,6 +378,7 @@ with gr.Blocks(css=css) as demo:
             0.95,
             35,
             0.94,
+            None,
         ],
         [
             "[S1] Open weights text to dialogue model. \n[S2] You get full control over scripts and voices. \n[S1] I'm biased, but I think we clearly won. \n[S2] Hard to disagree. (laughs) \n[S1] Thanks for listening to this demo. \n[S2] Try it now on Git hub and Hugging Face. \n[S1] If you liked our model, please give us a star and share to your friends. \n[S2] This was Nari Labs.",
@@ -337,6 +389,7 @@ with gr.Blocks(css=css) as demo:
             0.95,
             35,
             0.94,
+            None,
         ],
     ]
 
@@ -352,8 +405,9 @@ with gr.Blocks(css=css) as demo:
                 top_p,
                 cfg_filter_top_k,
                 speed_factor_slider,
+                seed,
             ],
-            outputs=[audio_output],
+            outputs=[audio_output, used_seed],
             fn=run_inference,
             cache_examples=False,
             label="Examples (Click to Run)",
